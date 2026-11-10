@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Calcolo punto di uscita</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#1565c0">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Deriva">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="icon-192.png">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,sans-serif;background:#f4f6f8;color:#111}
+main{max-width:760px;margin:0 auto;padding:12px}
+h1{font-size:20px;margin:6px 0 10px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+label{font-size:12px;color:#555;display:block}
+input{width:100%;padding:9px;font-size:16px;border:1px solid #bbb;border-radius:6px}
+button{width:100%;margin:10px 0;padding:13px;font-size:16px;font-weight:700;color:#fff;background:#1565c0;border:0;border-radius:8px}
+button:disabled{opacity:.6}
+#err{color:#c62828;margin:4px 0}
+button.sec{width:auto;margin:6px 8px 6px 0;padding:8px 12px;font-size:14px;background:#455a64}
+#gps{font-size:12px;color:#555}
+#res{background:#fff;border-radius:8px;padding:10px;margin-bottom:10px;line-height:1.5;display:none}
+#res b{font-size:15px}
+#map{height:420px;border-radius:8px}
+.note{font-size:11px;color:#777;margin-top:8px}
+.lg span{display:inline-block;width:22px;height:5px;vertical-align:middle;margin:0 4px 0 10px}
+</style>
+</head>
+<body>
+<main>
+<h1>Calcolo punto di uscita</h1>
+<div class="grid">
+  <div><label>Quota lancio (m AMSL)</label><input id="exitAlt" inputmode="decimal" value="4000"></div>
+  <div><label>Quota apertura (m AMSL)</label><input id="openAlt" inputmode="decimal" value="1500"></div>
+  <div><label>Efficienza vela (X:1, es. 3)</label><input id="eff" inputmode="decimal" value="3"></div>
+  <div><label>Velocità vela in aria (m/s)</label><input id="speed" inputmode="decimal" value="12"></div>
+  <div><label>Rateo caduta libera (m/s)</label><input id="ff" inputmode="decimal" value="55"></div>
+  <div><label>Rotta vela (°, vuoto = a favore di vento)</label><input id="heading" inputmode="decimal" placeholder="a favore di vento"></div>
+  <div><label>Latitudine atterraggio</label><input id="lat" inputmode="decimal" value="45.0"></div>
+  <div><label>Longitudine atterraggio</label><input id="lon" inputmode="decimal" value="10.0"></div>
+</div>
+<div style="margin-top:8px"><label>Ore al lancio (0–160)</label><input id="hours" inputmode="decimal" value="2"></div>
+<button id="go">Calcola</button>
+<div id="err"></div>
+<div id="res"></div>
+<div><button id="loc" class="sec">📍 La mia posizione</button><span id="gps">Richiesta GPS…</span></div>
+<div id="map"></div>
+<div class="lg"><span style="background:green"></span>caduta libera <span style="background:blue"></span>vela aperta</div>
+<p class="note">Tocca la mappa per impostare il punto di atterraggio. Meteo: Open-Meteo (open source, gratuito). Modello semplificato: vela con rotta costante (di default a favore del vento al suolo), rateo di discesa = velocità / efficienza; la caduta libera deriva solo col vento. La deriva è calcolata per strati di 1000 ft AGL con il vento medio dello strato (media delle misure ai due estremi); dove la direzione cambia di 90° o più tra due misure viene segnalata una zampa di cane. Indicativo: non usare come unico riferimento per la pianificazione.</p>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const LEVELS=[1000,975,950,925,900,850,800,700,600,500,400];
+const $=id=>document.getElementById(id);
+const num=id=>parseFloat($(id).value.replace(',','.'));
+
+const map=L.map('map').setView([45,10],6);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+const g=L.layerGroup().addTo(map);
+let tgt=L.circleMarker([45,10],{radius:9,color:'#000',fillColor:'red',fillOpacity:1}).addTo(map);
+map.on('click',e=>{
+  $('lat').value=e.latlng.lat.toFixed(5);$('lon').value=e.latlng.lng.toFixed(5);
+  tgt.setLatLng(e.latlng);
+});
+
+// --- GPS: richiede il permesso e mostra la posizione sulla mappa ---
+let me=null,meDot=null,meAcc=null,first=true,watchId=null;
+function gpsOK(p){
+  const ll=[p.coords.latitude,p.coords.longitude];
+  if(!meDot){
+    meAcc=L.circle(ll,{radius:p.coords.accuracy,color:'#1976d2',weight:1,fillOpacity:.1}).addTo(map);
+    meDot=L.circleMarker(ll,{radius:8,color:'#fff',weight:3,fillColor:'#1976d2',fillOpacity:1}).bindTooltip('Tu sei qui').addTo(map);
+  }else{meDot.setLatLng(ll);meAcc.setLatLng(ll).setRadius(p.coords.accuracy)}
+  me=ll;
+  $('gps').textContent='GPS attivo · precisione ±'+Math.round(p.coords.accuracy)+' m';
+  if(first){first=false;map.setView(ll,14)}
+}
+function gpsKO(e){
+  $('gps').textContent=e.code===1?'Permesso GPS negato: abilitalo nelle impostazioni del browser.':'GPS non disponibile ('+e.message+')';
+}
+function startGPS(){
+  if(!navigator.geolocation){$('gps').textContent='GPS non supportato da questo browser.';return}
+  if(!window.isSecureContext){$('gps').textContent='Il GPS richiede HTTPS: apri la pagina da un indirizzo https://.';return}
+  if(watchId!=null)navigator.geolocation.clearWatch(watchId);
+  $('gps').textContent='Richiesta GPS…';
+  watchId=navigator.geolocation.watchPosition(gpsOK,gpsKO,{enableHighAccuracy:true,maximumAge:5000,timeout:20000});
+}
+$('loc').onclick=()=>{if(me)map.setView(me,15);else startGPS()};
+startGPS();
+
+function windAt(pts,z){
+  if(z<=pts[0].h)return pts[0];
+  const last=pts[pts.length-1];
+  if(z>=last.h)return last;
+  for(let k=0;k<pts.length-1;k++){
+    const a=pts[k],b=pts[k+1];
+    if(z>=a.h&&z<=b.h){const f=(z-a.h)/((b.h-a.h)||1);return{u:a.u+f*(b.u-a.u),v:a.v+f*(b.v-a.v)}}
+  }
+  return pts[0];
+}
+const FT=0.3048,K=1000*FT;
+// Misure del vento ogni 1000 ft AGL, dal suolo fino a zMax
+function sample(pts,ground,zMax){
+  const m=[];
+  for(let k=0;ground+k*K<=zMax+1e-6;k++){
+    const z=ground+k*K,w=windAt(pts,z);
+    m.push({z,sp:Math.hypot(w.u,w.v),d:(Math.atan2(-w.u,-w.v)*180/Math.PI+360)%360});
+  }
+  return m;
+}
+// Tratto da zTop a zBot diviso in strati ai livelli di misura; vento dello strato = media delle misure ai due estremi
+function integrate(zTop,zBot,rate,pts,air,ground){
+  air=air||{u:0,v:0};
+  const mid=[];
+  for(let k=Math.floor((zBot-ground)/K)+1;ground+k*K<zTop-1e-6;k++){
+    const z=ground+k*K;if(z>zBot+1e-6)mid.push(z);
+  }
+  const zs=[zTop].concat(mid.reverse(),[zBot]);
+  let dx=0,dy=0,t=0;const path=[{z:zTop,dx:0,dy:0}];
+  for(let k=0;k<zs.length-1;k++){
+    const a=zs[k],b=zs[k+1],wa=windAt(pts,a),wb=windAt(pts,b),dt=(a-b)/rate;
+    dx+=((wa.u+wb.u)/2+air.u)*dt;dy+=((wa.v+wb.v)/2+air.v)*dt;t+=dt;
+    path.push({z:b,dx,dy});
+  }
+  return{dx,dy,t,path};
+}
+const toLL=(lat,lon,dx,dy)=>[lat+dy/111320,lon+dx/(111320*Math.cos(lat*Math.PI/180))];
+const vec=(s,d)=>{const r=d*Math.PI/180;return{u:-s*Math.sin(r),v:-s*Math.cos(r)}};
+
+$('go').onclick=async()=>{
+  const err=$('err'),res=$('res'),btn=$('go');
+  err.textContent='';res.style.display='none';btn.disabled=true;btn.textContent='Calcolo…';first=false;
+  try{
+    const exitAlt=num('exitAlt'),openAlt=num('openAlt'),eff=num('eff'),speed=num('speed'),ff=num('ff'),
+          lat=num('lat'),lon=num('lon'),hours=num('hours');
+    if([exitAlt,openAlt,eff,speed,ff,lat,lon,hours].some(x=>!isFinite(x)))throw new Error('Controlla i valori inseriti.');
+    if(exitAlt<=openAlt)throw new Error('La quota di lancio deve essere maggiore della quota di apertura.');
+    if(eff<=0||speed<=0||ff<=0)throw new Error('Efficienza, velocità e rateo devono essere positivi.');
+    const sink=speed/eff; // rateo di discesa della vela (m/s)
+    if(hours<0||hours>160)throw new Error('Ore al lancio: da 0 a 160.');
+
+    const vars=['wind_speed_10m','wind_direction_10m','surface_pressure','pressure_msl'].concat(
+      LEVELS.flatMap(l=>['wind_speed_'+l+'hPa','wind_direction_'+l+'hPa','geopotential_height_'+l+'hPa'])).join(',');
+    const url='https://api.open-meteo.com/v1/forecast?latitude='+lat+'&longitude='+lon+'&hourly='+vars+
+      '&wind_speed_unit=ms&timezone=GMT&forecast_days=7';
+    const j=await (await fetch(url)).json();
+    if(j.error)throw new Error(j.reason||'Errore Open-Meteo');
+
+    const when=new Date(Date.now()+hours*3600e3+1800e3).toISOString().slice(0,13)+':00';
+    const i=j.hourly.time.indexOf(when);
+    if(i<0)throw new Error('Ora non disponibile nelle previsioni.');
+    const H=j.hourly,ground=j.elevation??0;
+    if(openAlt<=ground)throw new Error('Quota di apertura sotto il suolo ('+Math.round(ground)+' m).');
+
+    const pts=[];
+    LEVELS.forEach(l=>{
+      const h=H['geopotential_height_'+l+'hPa'][i],s=H['wind_speed_'+l+'hPa'][i],d=H['wind_direction_'+l+'hPa'][i];
+      if(h!=null&&s!=null&&d!=null)pts.push({h,...vec(s,d)});
+    });
+    const s10=H.wind_speed_10m[i];
+    pts.push({h:ground+10,...vec(s10,H.wind_direction_10m[i])});
+    pts.sort((a,b)=>a.h-b.h);
+
+    const hs=$('heading').value.trim();
+    const hdg=hs===''?H.wind_direction_10m[i]+180:parseFloat(hs.replace(',','.'));
+    if(!isFinite(hdg))throw new Error('Rotta della vela non valida.');
+    const hr=hdg*Math.PI/180,air={u:speed*Math.sin(hr),v:speed*Math.cos(hr)};
+    const can=integrate(openAlt,ground,sink,pts,air,ground);
+    const free=integrate(exitAlt,openAlt,ff,pts,null,ground);
+    const ms=sample(pts,ground,exitAlt),dls=[];
+    for(let k=1;k<ms.length;k++){
+      const a=ms[k-1],b=ms[k];let dd=Math.abs(b.d-a.d);if(dd>180)dd=360-dd;
+      if(dd>=90&&a.sp>=1&&b.sp>=1)dls.push({z:b.z,zp:a.z,a:a.d,b:b.d,dd});
+    }
+    const ftA=z=>Math.round((z-ground)/FT/100)*100;
+    const warn=dls.map(x=>'<br><b style="color:#e65100">⚠ ZAMPA DI CANE a '+ftA(x.z)+' ft AGL ('+Math.round(x.z)+' m AMSL)</b>: vento da '+Math.round(x.a)+'° a '+Math.round(x.b)+'° (Δ'+Math.round(x.dd)+'°) tra '+ftA(x.zp)+' e '+ftA(x.z)+' ft').join('');
+    const det='<details><summary>Vento ogni 1000 ft</summary>'+ms.slice().reverse().map(m=>ftA(m.z)+' ft AGL · da '+Math.round(m.d)+'° · '+(m.sp*1.944).toFixed(0)+' kt').join('<br>')+'</details>';
+    const open=toLL(lat,lon,-can.dx,-can.dy);
+    const exit=toLL(lat,lon,-(can.dx+free.dx),-(can.dy+free.dy));
+    const dist=Math.hypot(can.dx+free.dx,can.dy+free.dy);
+    const brg=(Math.atan2(-(can.dx+free.dx),-(can.dy+free.dy))*180/Math.PI+360)%360;
+
+    // QFE: pressione al suolo in corrispondenza del punto di apertura
+    let qfe=H.surface_pressure?H.surface_pressure[i]:null,qnh=H.pressure_msl?H.pressure_msl[i]:null,gOpen=ground;
+    try{
+      const j2=await (await fetch('https://api.open-meteo.com/v1/forecast?latitude='+open[0]+'&longitude='+open[1]+
+        '&hourly=surface_pressure,pressure_msl&timezone=GMT&forecast_days=7')).json();
+      const i2=j2.hourly.time.indexOf(when);
+      if(i2>=0&&j2.hourly.surface_pressure[i2]!=null){
+        qfe=j2.hourly.surface_pressure[i2];gOpen=j2.elevation??ground;
+        if(j2.hourly.pressure_msl[i2]!=null)qnh=j2.hourly.pressure_msl[i2];
+      }
+    }catch(e){}
+    g.clearLayers();
+    const tx=can.dx+free.dx,ty=can.dy+free.dy;
+    const vs=free.path.map(p=>({z:p.z,ph:'f',ll:toLL(lat,lon,p.dx-tx,p.dy-ty)}))
+      .concat(can.path.slice(1).map(p=>({z:p.z,ph:'c',ll:toLL(lat,lon,free.dx+p.dx-tx,free.dy+p.dy-ty)})));
+    for(let k=0;k<vs.length-1;k++)
+      L.polyline([vs[k].ll,vs[k+1].ll],{color:vs[k+1].ph==='f'?'green':'blue',weight:5}).addTo(g);
+    dls.forEach(x=>{
+      const v=vs.find(q=>Math.abs(q.z-x.z)<1);
+      if(v)L.circleMarker(v.ll,{radius:8,color:'#000',fillColor:'orange',fillOpacity:1})
+        .bindTooltip('Zampa di cane '+ftA(x.z)+' ft',{permanent:true}).addTo(g);
+    });
+    L.circleMarker(exit,{radius:9,color:'#000',fillColor:'green',fillOpacity:1}).bindTooltip('USCITA',{permanent:true}).addTo(g);
+    L.circleMarker(open,{radius:6,color:'#000',fillColor:'#fff',fillOpacity:1}).bindTooltip('Apertura').addTo(g);
+    tgt.setLatLng([lat,lon]).bringToFront();
+    map.fitBounds(vs.map(v=>v.ll).concat([[lat,lon]]),{padding:[40,40]});
+
+    res.innerHTML='<b>Uscita: '+exit[0].toFixed(5)+', '+exit[1].toFixed(5)+'</b><br>'+
+      Math.round(dist)+' m dall\'atterraggio, in direzione '+Math.round(brg)+'°<br>'+
+      'Caduta libera '+Math.round(free.t)+' s (verde) · Vela '+Math.round(can.t)+' s (blu)<br>'+
+      '<b>Taratura Cypres Mil</b> – QFE (suolo all\'apertura): <b>'+(qfe!=null?qfe.toFixed(1)+' hPa':'n/d')+'</b>'+(qfe!=null&&qnh!=null?' · QNH '+qnh.toFixed(1)+' hPa (Δ '+(qfe-qnh).toFixed(1)+')':'')+' · terreno '+Math.round(gOpen)+' m · apertura a '+Math.round(openAlt/FT)+' ft AMSL / '+Math.round((openAlt-gOpen)/FT)+' ft AGL<br>'+
+      'Vela '+eff+':1 a '+speed+' m/s, discesa '+sink.toFixed(1)+' m/s, rotta '+Math.round((hdg%360+360)%360)+'°<br>'+
+      'Quota suolo '+Math.round(ground)+' m · vento al suolo '+s10.toFixed(1)+' m/s'+warn+det;
+    res.style.display='block';
+  }catch(e){err.textContent=e.message||'Errore';}
+  btn.disabled=false;btn.textContent='Calcola';
+};
+if('serviceWorker' in navigator&&window.isSecureContext)navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script>
+</body>
+</html>
