@@ -128,13 +128,25 @@ function integrate(zTop,zBot,rate,pts,air,ground){
     const z=ground+k*K;if(z>zBot+1e-6)mid.push(z);
   }
   const zs=[zTop].concat(mid.reverse(),[zBot]);
-  let dx=0,dy=0,t=0;const path=[{z:zTop,dx:0,dy:0}];
+  let dx=0,dy=0,t=0,mu=0,mv=0;const path=[{z:zTop,dx:0,dy:0}];
   for(let k=0;k<zs.length-1;k++){
     const a=zs[k],b=zs[k+1],wa=windAt(pts,a),wb=windAt(pts,b),dt=(a-b)/rate;
     dx+=((wa.u+wb.u)/2+air.u)*dt;dy+=((wa.v+wb.v)/2+air.v)*dt;t+=dt;
+    mu+=(wa.u+wb.u)/2*(a-b);mv+=(wa.v+wb.v)/2*(a-b);
     path.push({z:b,dx,dy});
   }
-  return{dx,dy,t,path};
+  const H=zTop-zBot||1;
+  return{dx,dy,t,path,mu:mu/H,mv:mv/H};
+}
+// Divide una fase (caduta libera 'f' o vela 'c') nelle parti delimitate dalle zampe di cane; ogni parte ha il suo vento medio
+function legs(zTop,zBot,rate,pts,air,ground,cuts,phase){
+  const zs=[zTop].concat(cuts.filter(z=>z<zTop-1&&z>zBot+1).sort((a,b)=>b-a),[zBot]);
+  const out=[];
+  for(let k=0;k<zs.length-1;k++){
+    const r=integrate(zs[k],zs[k+1],rate,pts,air,ground);
+    out.push({phase,top:zs[k],bot:zs[k+1],t:r.t,dx:r.dx,dy:r.dy,mu:r.mu,mv:r.mv});
+  }
+  return out;
 }
 const toLL=(lat,lon,dx,dy)=>[lat+dy/111320,lon+dx/(111320*Math.cos(lat*Math.PI/180))];
 const vec=(s,d)=>{const r=d*Math.PI/180;return{u:-s*Math.sin(r),v:-s*Math.cos(r)}};
@@ -180,16 +192,26 @@ $('go').onclick=async()=>{
     const hdg=hs===''?H.wind_direction_10m[i]+180:parseFloat(hs.replace(',','.'));
     if(!isFinite(hdg))throw new Error('Rotta della vela non valida.');
     const hr=hdg*Math.PI/180,air={u:speed*Math.sin(hr),v:speed*Math.cos(hr)};
-    const can=integrate(openAlt,ground,sink,pts,air,ground);
-    const free=integrate(exitAlt,openAlt,ff,pts,null,ground);
     const ms=sample(pts,ground,exitAlt),dls=[];
     for(let k=1;k<ms.length;k++){
       const a=ms[k-1],b=ms[k];let dd=Math.abs(b.d-a.d);if(dd>180)dd=360-dd;
       if(dd>=90&&a.sp>=1&&b.sp>=1)dls.push({z:b.z,zp:a.z,a:a.d,b:b.d,dd});
     }
+    // due fasi (paracadute chiuso / aperto), ciascuna divisa ulteriormente alle zampe di cane
+    const cuts=dls.map(x=>x.z);
+    const lf=legs(exitAlt,openAlt,ff,pts,null,ground,cuts,'f');
+    const lc=legs(openAlt,ground,sink,pts,air,ground,cuts,'c');
+    const all=lf.concat(lc);
+    const sumL=ls=>ls.reduce((a,l)=>({dx:a.dx+l.dx,dy:a.dy+l.dy,t:a.t+l.t}),{dx:0,dy:0,t:0});
+    const free=sumL(lf),can=sumL(lc);
     const ftA=z=>Math.round((z-ground)/FT/100)*100;
     const warn=dls.map(x=>'<br><b style="color:#e65100">⚠ ZAMPA DI CANE a '+ftA(x.z)+' ft AGL ('+Math.round(x.z)+' m AMSL)</b>: vento da '+Math.round(x.a)+'° a '+Math.round(x.b)+'° (Δ'+Math.round(x.dd)+'°) tra '+ftA(x.zp)+' e '+ftA(x.z)+' ft').join('');
     const wd=w=>({sp:Math.hypot(w.u,w.v),d:(Math.atan2(-w.u,-w.v)*180/Math.PI+360)%360});
+    const cnt={f:lf.length,c:lc.length},idx={f:0,c:0},d3=x=>String(Math.round(x)%360).padStart(3,'0')+'°';
+    const ptab='<br><b>Calcolo per parti (vento medio)</b><table class="wt"><tr><th>Parte</th><th>Quota</th><th>Vento medio</th><th>Deriva</th></tr>'+all.map(l=>{
+      const n=++idx[l.phase],m=wd({u:l.mu,v:l.mv}),dd=Math.hypot(l.dx,l.dy),b=(Math.atan2(l.dx,l.dy)*180/Math.PI+360)%360;
+      return '<tr><td style="border-left:4px solid '+(l.phase==='f'?'green':'blue')+'">'+(l.phase==='f'?'Caduta libera':'Vela aperta')+(cnt[l.phase]>1?' '+n+'/'+cnt[l.phase]:'')+'</td><td>'+ftA(l.top)+'→'+ftA(l.bot)+' ft</td><td>da '+d3(m.d)+' · '+(m.sp*1.944).toFixed(0)+' kt</td><td>'+Math.round(dd)+' m → '+d3(b)+'<br><small>'+Math.round(l.t)+' s</small></td></tr>';
+    }).join('')+'</table>';
     const rows=ms.map(m=>({z:m.z,sp:m.sp,d:m.d,tag:''}));
     [[exitAlt,'lancio'],[openAlt,'apertura']].forEach(([z,tag])=>rows.push({z,...wd(windAt(pts,z)),tag}));
     rows.sort((a,b)=>b.z-a.z||(a.tag?-1:1));
@@ -214,26 +236,30 @@ $('go').onclick=async()=>{
     }catch(e){}
     g.clearLayers();
     const tx=can.dx+free.dx,ty=can.dy+free.dy;
-    const vs=free.path.map(p=>({z:p.z,ph:'f',ll:toLL(lat,lon,p.dx-tx,p.dy-ty)}))
-      .concat(can.path.slice(1).map(p=>({z:p.z,ph:'c',ll:toLL(lat,lon,free.dx+p.dx-tx,free.dy+p.dy-ty)})));
-    for(let k=0;k<vs.length-1;k++)
-      L.polyline([vs[k].ll,vs[k+1].ll],{color:vs[k+1].ph==='f'?'green':'blue',weight:5}).addTo(g);
+    let cx=-tx,cy=-ty;
+    const bp=[{z:exitAlt,ll:toLL(lat,lon,cx,cy)}];
+    all.forEach(l=>{
+      cx+=l.dx;cy+=l.dy;
+      const p=toLL(lat,lon,cx,cy);
+      L.polyline([bp[bp.length-1].ll,p],{color:l.phase==='f'?'green':'blue',weight:5}).addTo(g);
+      bp.push({z:l.bot,ll:p});
+    });
     dls.forEach(x=>{
-      const v=vs.find(q=>Math.abs(q.z-x.z)<1);
+      const v=bp.find(q=>Math.abs(q.z-x.z)<1);
       if(v)L.circleMarker(v.ll,{radius:8,color:'#000',fillColor:'orange',fillOpacity:1})
         .bindTooltip('Zampa di cane '+ftA(x.z)+' ft',{permanent:true}).addTo(g);
     });
     L.circleMarker(exit,{radius:9,color:'#000',fillColor:'green',fillOpacity:1}).bindTooltip('USCITA',{permanent:true}).addTo(g);
     L.circleMarker(open,{radius:6,color:'#000',fillColor:'#fff',fillOpacity:1}).bindTooltip('Apertura').addTo(g);
     tgt.setLatLng([lat,lon]).bringToFront();
-    map.fitBounds(vs.map(v=>v.ll).concat([[lat,lon]]),{padding:[40,40]});
+    map.fitBounds(bp.map(v=>v.ll).concat([[lat,lon]]),{padding:[40,40]});
 
     res.innerHTML='<b>Uscita: '+exit[0].toFixed(5)+', '+exit[1].toFixed(5)+'</b><br>'+
       'Deriva totale '+Math.round(dist)+' m verso '+Math.round((brg+180)%360)+'° → uscita a '+Math.round(brg)+'° dal punto di atterraggio<br>'+
       'Caduta libera '+Math.round(free.t)+' s (verde) · Vela '+Math.round(can.t)+' s (blu)<br>'+
       '<b>Taratura Cypres Mil</b> – QFE (suolo all\'apertura): <b>'+(qfe!=null?qfe.toFixed(1)+' hPa':'n/d')+'</b>'+(qfe!=null&&qnh!=null?' · QNH '+qnh.toFixed(1)+' hPa (Δ '+(qfe-qnh).toFixed(1)+')':'')+' · terreno '+Math.round(gOpen)+' m · apertura a '+Math.round(openAlt/FT)+' ft AMSL / '+Math.round((openAlt-gOpen)/FT)+' ft AGL<br>'+
       (speed>0?'Vela '+eff+':1 a '+speed+' m/s, discesa '+sink.toFixed(1)+' m/s, rotta '+Math.round((hdg%360+360)%360)+'°':'Paracadute senza spinta, discesa '+sink.toFixed(1)+' m/s')+'<br>'+
-      'Quota suolo '+Math.round(ground)+' m · vento al suolo '+s10.toFixed(1)+' m/s'+warn+det;
+      'Quota suolo '+Math.round(ground)+' m · vento al suolo '+s10.toFixed(1)+' m/s'+warn+ptab+det;
     res.style.display='block';
   }catch(e){err.textContent=e.message||'Errore';}
   btn.disabled=false;btn.textContent='Calcola';
