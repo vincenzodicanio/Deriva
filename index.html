@@ -25,6 +25,9 @@ button:disabled{opacity:.6}
 #err{color:#c62828;margin:4px 0}
 button.sec{width:auto;margin:6px 8px 6px 0;padding:8px 12px;font-size:14px;background:#455a64}
 #gps{font-size:12px;color:#555}
+.wt{width:100%;border-collapse:collapse;margin-top:6px;font-size:13px}
+.wt th,.wt td{border-bottom:1px solid #e0e0e0;padding:3px 6px;text-align:left}
+.wt th{background:#eceff1}.wt .dl td{background:#fff3e0}.wt small{color:#777}
 #res{background:#fff;border-radius:8px;padding:10px;margin-bottom:10px;line-height:1.5;display:none}
 #res b{font-size:15px}
 #map{height:420px;border-radius:8px}
@@ -45,7 +48,10 @@ button.sec{width:auto;margin:6px 8px 6px 0;padding:8px 12px;font-size:14px;backg
   <div><label>Latitudine atterraggio</label><input id="lat" inputmode="decimal" value="45.0"></div>
   <div><label>Longitudine atterraggio</label><input id="lon" inputmode="decimal" value="10.0"></div>
 </div>
-<div style="margin-top:8px"><label>Ore al lancio (0–160)</label><input id="hours" inputmode="decimal" value="2"></div>
+<div class="grid" style="margin-top:8px">
+  <div><label>Ore al lancio (0–160)</label><input id="hours" inputmode="decimal" value="2"></div>
+  <div><label>Rateo discesa vela (m/s, opz.)</label><input id="sinkIn" inputmode="decimal" placeholder="= velocità / efficienza"></div>
+</div>
 <button id="go">Calcola</button>
 <div id="err"></div>
 <div id="res"></div>
@@ -141,8 +147,11 @@ $('go').onclick=async()=>{
           lat=num('lat'),lon=num('lon'),hours=num('hours');
     if([exitAlt,openAlt,eff,speed,ff,lat,lon,hours].some(x=>!isFinite(x)))throw new Error('Controlla i valori inseriti.');
     if(exitAlt<=openAlt)throw new Error('La quota di lancio deve essere maggiore della quota di apertura.');
-    if(eff<=0||speed<=0||ff<=0)throw new Error('Efficienza, velocità e rateo devono essere positivi.');
-    const sink=speed/eff; // rateo di discesa della vela (m/s)
+    if(eff<0||speed<0||ff<=0)throw new Error('Efficienza e velocità non possono essere negative; il rateo in caduta libera deve essere positivo.');
+    const sS=$('sinkIn').value.trim();
+    // rateo di discesa della vela (m/s): inserito, oppure velocità / efficienza
+    const sink=sS===''?(eff>0&&speed>0?speed/eff:NaN):parseFloat(sS.replace(',','.'));
+    if(!(sink>0))throw new Error('Rateo di discesa mancante: per un paracadute rotondo metti efficienza 0, velocità 0 e il rateo di discesa.');
     if(hours<0||hours>160)throw new Error('Ore al lancio: da 0 a 160.');
 
     const vars=['wind_speed_10m','wind_direction_10m','surface_pressure','pressure_msl'].concat(
@@ -180,7 +189,13 @@ $('go').onclick=async()=>{
     }
     const ftA=z=>Math.round((z-ground)/FT/100)*100;
     const warn=dls.map(x=>'<br><b style="color:#e65100">⚠ ZAMPA DI CANE a '+ftA(x.z)+' ft AGL ('+Math.round(x.z)+' m AMSL)</b>: vento da '+Math.round(x.a)+'° a '+Math.round(x.b)+'° (Δ'+Math.round(x.dd)+'°) tra '+ftA(x.zp)+' e '+ftA(x.z)+' ft').join('');
-    const det='<details><summary>Vento ogni 1000 ft</summary>'+ms.slice().reverse().map(m=>ftA(m.z)+' ft AGL · da '+Math.round(m.d)+'° · '+(m.sp*1.944).toFixed(0)+' kt').join('<br>')+'</details>';
+    const wd=w=>({sp:Math.hypot(w.u,w.v),d:(Math.atan2(-w.u,-w.v)*180/Math.PI+360)%360});
+    const rows=ms.map(m=>({z:m.z,sp:m.sp,d:m.d,tag:''}));
+    [[exitAlt,'lancio'],[openAlt,'apertura']].forEach(([z,tag])=>rows.push({z,...wd(windAt(pts,z)),tag}));
+    rows.sort((a,b)=>b.z-a.z||(a.tag?-1:1));
+    const dlZ=dls.map(x=>x.z);
+    const det='<br><b>Vento alle varie quote</b><table class="wt"><tr><th>Quota</th><th>Direz. (da)</th><th>Vento</th></tr>'+rows.map(m=>
+      '<tr'+(dlZ.some(z=>Math.abs(z-m.z)<1)?' class="dl"':'')+'><td>'+ftA(m.z)+' ft AGL<br><small>'+Math.round(m.z)+' m AMSL'+(m.tag?' · '+m.tag:'')+'</small></td><td>'+String(Math.round(m.d)%360).padStart(3,'0')+'°</td><td>'+(m.sp*1.944).toFixed(0)+' kt<br><small>'+m.sp.toFixed(1)+' m/s</small></td></tr>').join('')+'</table>';
     const open=toLL(lat,lon,-can.dx,-can.dy);
     const exit=toLL(lat,lon,-(can.dx+free.dx),-(can.dy+free.dy));
     const dist=Math.hypot(can.dx+free.dx,can.dy+free.dy);
@@ -214,10 +229,10 @@ $('go').onclick=async()=>{
     map.fitBounds(vs.map(v=>v.ll).concat([[lat,lon]]),{padding:[40,40]});
 
     res.innerHTML='<b>Uscita: '+exit[0].toFixed(5)+', '+exit[1].toFixed(5)+'</b><br>'+
-      Math.round(dist)+' m dall\'atterraggio, in direzione '+Math.round(brg)+'°<br>'+
+      'Deriva totale '+Math.round(dist)+' m verso '+Math.round((brg+180)%360)+'° → uscita a '+Math.round(brg)+'° dal punto di atterraggio<br>'+
       'Caduta libera '+Math.round(free.t)+' s (verde) · Vela '+Math.round(can.t)+' s (blu)<br>'+
       '<b>Taratura Cypres Mil</b> – QFE (suolo all\'apertura): <b>'+(qfe!=null?qfe.toFixed(1)+' hPa':'n/d')+'</b>'+(qfe!=null&&qnh!=null?' · QNH '+qnh.toFixed(1)+' hPa (Δ '+(qfe-qnh).toFixed(1)+')':'')+' · terreno '+Math.round(gOpen)+' m · apertura a '+Math.round(openAlt/FT)+' ft AMSL / '+Math.round((openAlt-gOpen)/FT)+' ft AGL<br>'+
-      'Vela '+eff+':1 a '+speed+' m/s, discesa '+sink.toFixed(1)+' m/s, rotta '+Math.round((hdg%360+360)%360)+'°<br>'+
+      (speed>0?'Vela '+eff+':1 a '+speed+' m/s, discesa '+sink.toFixed(1)+' m/s, rotta '+Math.round((hdg%360+360)%360)+'°':'Paracadute senza spinta, discesa '+sink.toFixed(1)+' m/s')+'<br>'+
       'Quota suolo '+Math.round(ground)+' m · vento al suolo '+s10.toFixed(1)+' m/s'+warn+det;
     res.style.display='block';
   }catch(e){err.textContent=e.message||'Errore';}
