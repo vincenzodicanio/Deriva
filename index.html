@@ -264,6 +264,13 @@ $('go').onclick=async()=>{
   }catch(e){err.textContent=e.message||'Errore';}
   btn.disabled=false;btn.textContent='Calcola';
 };
+// Invio (o "Vai" sulla tastiera del telefono) in un campo = Calcola
+document.querySelectorAll('input').forEach(i=>{
+  i.setAttribute('enterkeyhint','go');
+  i.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();i.blur();$('go').click()}});
+});
+// Un errore imprevisto non deve restare silenzioso
+window.addEventListener('error',e=>{$('err').textContent='Errore: '+e.message});
 if('serviceWorker' in navigator&&window.isSecureContext)navigator.serviceWorker.register('sw.js').catch(()=>{});
 </script>
 </body>
